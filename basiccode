@@ -1,0 +1,77 @@
+import os
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import Chroma
+from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
+
+# Step 0: Set Gemini API Key
+os.environ["GOOGLE_API_KEY"] = "your-gemini-api-key"
+
+# Step 1: Load and index protocol documents
+protocol_paths = {
+    "Protocol_A": "protocol_A.pdf",
+    "Protocol_B": "protocol_B.pdf",
+    "Protocol_C": "protocol_C.pdf",
+    "Protocol_D": "protocol_D.pdf",
+    "Protocol_E": "protocol_E.pdf",
+    "Protocol_F": "protocol_F.pdf"
+}
+
+embedding = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+protocol_vectorstores = {}
+
+splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+
+for name, path in protocol_paths.items():
+    loader = PyPDFLoader(path)
+    docs = splitter.split_documents(loader.load())
+    vectorstore = Chroma.from_documents(docs, embedding, collection_name=name)
+    protocol_vectorstores[name] = vectorstore
+
+# Step 2: Load new medical document
+new_doc_loader = PyPDFLoader("new_medical_doc.pdf")
+new_doc_chunks = splitter.split_documents(new_doc_loader.load())
+
+# Step 3: Match new document to relevant protocols
+# Embed new document chunks and compare with each protocol vectorstore
+matched_protocols = []
+for name, store in protocol_vectorstores.items():
+    retriever = store.as_retriever(search_kwargs={"k": 3})
+    results = retriever.get_relevant_documents(new_doc_chunks[0].page_content)
+    if results:
+        matched_protocols.append((name, retriever))
+
+# Step 4: Define prompt template
+template = """
+You are a medical QA assistant. Based on the following protocol context, generate test cases that validate compliance with the protocol.
+
+Context:
+{context}
+
+Instruction:
+Generate test cases that ensure the document adheres to the protocol. Be specific and avoid assumptions not grounded in the context.
+
+Test Cases:
+"""
+
+prompt = PromptTemplate(
+    input_variables=["context", "question"],
+    template=template,
+)
+
+# Step 5: Generate test cases for each matched protocol
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+
+for protocol_name, retriever in matched_protocols:
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        retriever=retriever,
+        chain_type_kwargs={"prompt": prompt}
+    )
+    query = f"Generate test cases for the new document based on {protocol_name}."
+    response = qa_chain.run(query)
+    print(f"\n--- Test Cases for {protocol_name} ---\n")
+    print(response)
